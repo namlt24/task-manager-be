@@ -1,0 +1,14 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.log
+uploads/
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example

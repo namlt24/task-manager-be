@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: task-manager
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+  thymeleaf:
+    # Email templates are introduced in Giai đoạn 4; skip the location check until then
+    check-template-location: false
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${MAIL_SMTP_AUTH:false}
+          starttls:
+            enable: ${MAIL_SMTP_STARTTLS:false}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: task-manager
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+  error:
+    # Don't leak internals on the default error path (our GlobalExceptionHandler returns ProblemDetail)
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+  api-docs:
+    path: /v3/api-docs
+
+app:
+  frontend-url: ${FRONTEND_URL:http://localhost:4200}
+  jwt:
+    secret: ${JWT_SECRET:change-me-please-use-a-long-random-secret-key-at-least-32-bytes-long}
+    access-token-expiration-ms: 900000        # 15 minutes
+    refresh-token-expiration-ms: 604800000    # 7 days
+    issuer: task-manager
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
+  mail:
+    from: ${MAIL_FROM:no-reply@taskmanager.local}
+  storage:
+    location: ${STORAGE_LOCATION:./uploads}
+  scheduler:
+    reminder-poll-ms: ${REMINDER_POLL_MS:60000}   # quét reminder mỗi 60s
+  messaging:
+    enabled: ${MESSAGING_ENABLED:true}            # bật outbox relay + Kafka consumer (tắt trong test)
+    topic: task-events
+    outbox-poll-ms: ${OUTBOX_POLL_MS:5000}        # relay đẩy outbox → Kafka mỗi 5s
