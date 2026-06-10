@@ -1,0 +1,89 @@
+================================================================================
+ MỞ RỘNG M5 — ACTIVITY LOG + REALTIME WEBSOCKET (STOMP)
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU M5
+--------------------------------------------------------------------------------
+Nhật ký hoạt động workspace ("A giao việc cho B") + cập nhật TRỰC TIẾP (live) giữa
+các thành viên qua WebSocket/STOMP — tái dùng chính pipeline Kafka của M4 (thêm 2
+consumer group mới).
+
+--------------------------------------------------------------------------------
+B. HẠ TẦNG
+--------------------------------------------------------------------------------
+- pom.xml: thêm spring-boot-starter-websocket. SecurityConfig: thêm /ws/** vào
+  PUBLIC_PATHS (handshake không qua JWT filter; xác thực ở STOMP CONNECT).
+- 3 CONSUMER GROUP độc lập trên cùng topic task-events (mỗi group nhận tất cả
+  message): tm-notification (M4, đổi tên từ task-manager), tm-activity, tm-realtime.
+
+--------------------------------------------------------------------------------
+C. ACTIVITY LOG
+--------------------------------------------------------------------------------
+- V15__activity_log.sql: activity_log(id, workspace_id, actor_id, type, task_id,
+  target_user_id, message, created_at) + index (workspace_id, id DESC).
+  TaskEventPayload thêm actorId (null cho event hệ thống như reminder).
+- ActivityConsumer (@KafkaListener group=tm-activity): bỏ qua event không có actor
+  (reminder); build message ("{actor} đã giao việc «{title}» cho {target}" /
+  "{actor} đã hoàn thành «{title}»") qua lookup tên user → ActivityService.record.
+  ActivityService.list(wsId) (requireMemberOf, top 50 desc, resolve actorName).
+- GET /v1/workspaces/{id}/activity (members only).
+
+--------------------------------------------------------------------------------
+D. REALTIME (WEBSOCKET/STOMP)
+--------------------------------------------------------------------------------
+- WebSocketConfig (@EnableWebSocketMessageBroker): endpoint /ws (NATIVE WebSocket,
+  KHÔNG SockJS — đồng nhất cho browser + tooling), simple broker /topic, app prefix
+  /app, gắn StompAuthChannelInterceptor.
+- StompAuthChannelInterceptor (ChannelInterceptor inbound):
+  * CONNECT → đọc header Authorization: Bearer, JwtService.parse → set principal =
+    userId.
+  * SUBSCRIBE /topic/workspace/{id} → kiểm tra
+    memberRepository.existsByWorkspaceIdAndUserId (CHẶN người ngoài workspace).
+- RealtimeConsumer (@KafkaListener group=tm-realtime): forward event →
+  SimpMessagingTemplate.convertAndSend("/topic/workspace/{workspaceId}", payload).
+
+--------------------------------------------------------------------------------
+E. FRONTEND
+--------------------------------------------------------------------------------
+- Cài @stomp/stompjs. RealtimeService: 1 kết nối STOMP (brokerURL ws(s)://.../
+  api/ws, connectHeaders Authorization), subscribe /topic/workspace/{currentId}
+  (re-subscribe khi đổi workspace), expose signal lastEvent + connected.
+  kanban.model NotificationType +ASSIGNED/COMPLETED (M4).
+- main-layout: effect connect realtime khi có workspace; mỗi lastEvent → refresh
+  unread-count (BADGE CHUÔNG CẬP NHẬT LIVE) + reload dropdown nếu đang mở; logout
+  → disconnect.
+- board: effect trên lastEvent → nếu event của người KHÁC (actorId != mình) và là
+  ASSIGNED/COMPLETED → reload() (bảng tự cập nhật, không cần F5).
+- Trang /activity "Hoạt động" (menu sidebar cuối): list GET activity, mỗi lastEvent
+  ASSIGNED/COMPLETED → PREPEND dòng mới (animation flash) + chip "● trực tiếp" khi
+  connected.
+
+--------------------------------------------------------------------------------
+F. KẾT QUẢ KIỂM THỬ E2E (node @stomp/stompjs + ws + fetch + Mailpit)
+--------------------------------------------------------------------------------
+- PM tạo workspace → mời B (lấy token từ Mailpit API) → B accept → PM tạo task →
+  B kết nối STOMP (JWT) + subscribe /topic/workspace/{id} → PM assign → B NHẬN
+  EVENT TASK_ASSIGNED QUA STOMP (payload đầy đủ) → GET activity trả "PM Five đã
+  giao việc «…» cho Bee Five". PASS.
+- Bảo mật subscribe: người ngoài workspace (token hợp lệ) subscribe
+  /topic/workspace/{id} → BỊ CHẶN (interceptor ném → ERROR frame).
+- mvn verify 4/4 xanh (WebSocket bean nạp trong test; messaging.enabled=false nên
+  không cần broker).
+
+--------------------------------------------------------------------------------
+G. LƯU Ý
+--------------------------------------------------------------------------------
+- Endpoint là NATIVE WebSocket (ws://localhost:8080/api/ws), KHÔNG phải SockJS.
+- Realtime cần Kafka chạy (event đi qua relay 5s → consumer → STOMP). FE reconnect
+  tự động (reconnectDelay 5s).
+- (Sửa khi deploy) RealtimeService dựng URL: dev apiUrl tuyệt đối → đổi scheme +
+  bỏ /api/v1; prod apiUrl tương đối → dùng origin trang (nginx proxy /api/ws với
+  header Upgrade).
+
+================================================================================
+ TỔNG KẾT: Toàn bộ lộ trình M1→M5 HOÀN THÀNH (cộng tác + Kafka + realtime).
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

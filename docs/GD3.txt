@@ -1,0 +1,125 @@
+================================================================================
+ GIAI ĐOẠN 3 — MỞ RỘNG TASK: SUBTASK/CHECKLIST, TÌM KIẾM, GHI CHÚ, ĐÍNH KÈM
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 3
+--------------------------------------------------------------------------------
+Bổ sung các tính năng làm "dày" công việc quanh một Task:
+  - Subtask / Checklist: việc con có tick hoàn thành + thanh tiến độ.
+  - Tìm kiếm & lọc nâng cao (JPA Specification): từ khoá, danh mục, nhãn,
+    ưu tiên, trạng thái, khoảng hạn.
+  - Ghi chú (markdown): trang ghi chú riêng + gắn note vào task.
+  - Đính kèm tệp: upload/download/xoá, lưu file ra volume.
+
+Nguyên tắc: vẫn cô lập dữ liệu theo user (user_id), kiểm tra ownership trước khi
+thao tác (của người khác → 404).
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ
+--------------------------------------------------------------------------------
+Backend : Spring Data JPA + JpaSpecificationExecutor (search động), Flyway
+          (V4, V5, V6), MultipartFile (upload, giới hạn 10MB), lưu file ra
+          volume cục bộ (app.storage.location, mặc định ./uploads).
+Frontend: Angular 18, marked (render markdown), @angular/cdk (sẵn từ GĐ2),
+          HttpClient blob (download có gắn JWT).
+
+--------------------------------------------------------------------------------
+C. MÔ HÌNH DỮ LIỆU & MIGRATION
+--------------------------------------------------------------------------------
+V4__subtasks.sql
+  - subtasks(id, task_id FK→tasks ON DELETE CASCADE, user_id, title, completed,
+    position, created_at, updated_at) + index task_id.
+
+V5__notes.sql
+  - notes(id, user_id, task_id FK→tasks ON DELETE CASCADE [NULL], title,
+    content TEXT, created_at, updated_at) + index user/task.
+
+V6__attachments.sql
+  - attachments(id, task_id FK→tasks CASCADE, user_id, original_name,
+    stored_name, content_type, size_bytes, created_at, updated_at) + index task.
+
+--------------------------------------------------------------------------------
+D. BACKEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+1) Module subtask (entity/repo/dto/mapper/service/controller)
+   - Endpoints: GET/POST /api/v1/tasks/{taskId}/subtasks ;
+     PUT/DELETE /api/v1/subtasks/{id} (title và/hoặc completed).
+   - Validate task thuộc user trước khi thao tác (ownership → 404).
+   - TaskDto thêm subtaskTotal + subtaskDone để thẻ Kanban hiện tiến độ (vd 2/5);
+     BoardService.getDetail BATCH-LOAD counts cho toàn bộ task của board (tránh N+1).
+
+2) Tìm kiếm & lọc — module task (mở rộng)
+   - TaskRepository thêm JpaSpecificationExecutor.
+   - TaskService.search(q, boardId, categoryId, labelId, priority, completed,
+     dueFrom, dueTo): dựng JPA Specification (scope user; keyword ILIKE
+     title/description; join labels cho labelId; khoảng due_date; distinct; sort
+     createdAt desc).
+   - Endpoint GET /api/v1/tasks/search (mọi param optional; dueFrom/dueTo ISO).
+     LƯU Ý: route /search đặt TRƯỚC /{id} để không bị nuốt.
+
+3) Module note (entity/repo/dto/mapper/service/controller)
+   - Endpoints: GET /api/v1/notes (lọc ?taskId=), GET /notes/{id},
+     POST /notes (title/content/taskId?), PUT/DELETE /notes/{id}.
+   - Validate task liên kết thuộc user (400 nếu không hợp lệ); ownership (404).
+
+4) Module attachment + FileStorageService
+   - FileStorageService: lưu file ra volume với tên ngẫu nhiên (UUID+ext),
+     chống path traversal; load Resource để tải; xoá file.
+   - Endpoints: GET/POST /api/v1/tasks/{taskId}/attachments (multipart "file"),
+     GET /api/v1/attachments/{id}/download (Content-Disposition, tên gốc UTF-8),
+     DELETE /api/v1/attachments/{id}.
+   - TaskDto thêm attachmentCount; BoardService.getDetail batch-load count đính kèm.
+
+--------------------------------------------------------------------------------
+E. FRONTEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+- subtask.service: trong modal task có mục "Việc con": thanh tiến độ + list
+  tick/xoá + ô thêm; thẻ Kanban badge "☑ done/total" (xanh khi đủ).
+- Thanh lọc trên bảng Kanban: ô tìm + ưu tiên + danh mục + nhãn + "ẩn việc đã
+  xong" + nút xoá lọc. Lọc CLIENT-SIDE trên dữ liệu đã tải (visibleTasks(col));
+  khi đang lọc thì TẮT kéo-thả (cdkDragDisabled) + badge đếm theo số thẻ hiển thị.
+- Cài marked. Trang /notes 2 cột (danh sách + soạn thảo) với toggle Soạn/Xem
+  trước (render markdown, Angular tự sanitize). Style .markdown ở global styles.scss.
+  Modal task: mô tả có toggle "Xem trước" markdown.
+- attachment.service: upload FormData; download bằng HttpClient blob (để
+  interceptor gắn JWT) rồi tạo object URL tải xuống. Modal task mục Đính kèm
+  (list tải/xoá + chọn tệp); thẻ Kanban badge "📎 N".
+
+--------------------------------------------------------------------------------
+F. DANH SÁCH ENDPOINT (prefix /api/v1, cần Bearer JWT)
+--------------------------------------------------------------------------------
+Subtask    : GET/POST /tasks/{taskId}/subtasks ; PUT/DELETE /subtasks/{id}
+Search     : GET /tasks/search?q=&boardId=&categoryId=&labelId=&priority=
+             &completed=&dueFrom=&dueTo=
+Note       : GET /notes (?taskId=) ; GET /notes/{id} ;
+             POST /notes ; PUT/DELETE /notes/{id}
+Attachment : GET/POST /tasks/{taskId}/attachments ;
+             GET /attachments/{id}/download ; DELETE /attachments/{id}
+
+--------------------------------------------------------------------------------
+G. KẾT QUẢ KIỂM THỬ (end-to-end)
+--------------------------------------------------------------------------------
+- Subtask: tạo/list/toggle/xoá; board detail trả subtaskTotal=3,subtaskDone=1;
+  ownership user khác → 404. Screenshot: modal "Việc con (2/5)" + badge ☑ trên thẻ.
+- Search (đếm theo "title"): q=login→2, priority=URGENT→1, labelId→1,
+  q+priority→1, completed=false→3, no-filter→3, no-auth→401. Screenshot: gõ
+  "login" → đúng 2 thẻ.
+- Note: create 201/list/update 200/get/link task lỗi 400/blank 400/delete 204/
+  ownership 404. Screenshot: preview render markdown.
+- Attachment: upload 201 (filename/size/contentType), list, download đúng nội
+  dung, attachmentCount=1, upload rỗng 400, delete 204 (xoá cả file), ownership 404.
+
+--------------------------------------------------------------------------------
+H. LƯU Ý
+--------------------------------------------------------------------------------
+- Route /tasks/search phải khai báo trước /tasks/{id}.
+- Download phải đi qua HttpClient (blob) để interceptor gắn JWT — không dùng
+  thẻ <a href> trực tiếp (sẽ 401).
+- Gửi tiếng Việt bằng curl trong Git-Bash dễ hỏng UTF-8 → test qua giao diện.
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

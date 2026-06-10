@@ -1,0 +1,107 @@
+================================================================================
+ GIAI ĐOẠN 4 — NHẮC NHỞ & LẶP LẠI & THÔNG BÁO + EMAIL
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 4
+--------------------------------------------------------------------------------
+  - Nhắc nhở (reminder): scheduler quét task tới giờ nhắc → tạo thông báo + email.
+  - Lặp lại (recurrence): khi hoàn thành task lặp → sinh instance kế tiếp.
+  - Trung tâm thông báo (notification center) trong app + chuông badge.
+  - Email bất đồng bộ (@Async) qua template Thymeleaf.
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ
+--------------------------------------------------------------------------------
+Backend : @Scheduled (job định kỳ), @Async (email), Spring Mail + Thymeleaf,
+          Flyway (V7). Email test bằng Mailpit (SMTP localhost:1025).
+Frontend: Angular 18 signals, RxJS interval (poll badge 60s).
+
+--------------------------------------------------------------------------------
+C. MÔ HÌNH DỮ LIỆU & MIGRATION (V7__reminders_notifications.sql)
+--------------------------------------------------------------------------------
+- ALTER tasks thêm: recurrence_freq VARCHAR(10) (DAILY/WEEKLY/MONTHLY, null=không
+  lặp), recurrence_interval INT, recurrence_until TIMESTAMPTZ (null=vô hạn),
+  reminder_sent BOOLEAN DEFAULT false (cờ chống nhắc lặp) + partial index
+  idx_tasks_remind ON tasks(remind_at) WHERE remind_at IS NOT NULL.
+- notifications(id, user_id FK→users CASCADE, task_id FK→tasks CASCADE [NULL],
+  type VARCHAR (REMINDER/RECURRENCE), title, message TEXT, read BOOLEAN, audit)
+  + index (user_id, read).
+
+--------------------------------------------------------------------------------
+D. BACKEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+1) LẶP LẠI (recurrence) — event-driven khi hoàn thành
+   - Task embed enum RecurrenceFreq + 3 field lặp + reminderSent.
+   - TaskService.update: khi completed chuyển false→true và task có recurrenceFreq
+     → spawnNextOccurrence (clone cùng cột/category/labels/priority/recurrence;
+     dueDate+remindAt dịch theo freq×interval qua helper shift dùng ZonedDateTime
+     UTC; completed=false, reminderSent=false, position cuối cột). Bỏ qua nếu
+     nextDue > recurrence_until. Khi remindAt đổi/xoá → reset reminderSent=false.
+
+2) NHẮC NHỞ (scheduler) — reminder/ReminderScheduler
+   - @Scheduled(fixedDelayString="${app.scheduler.reminder-poll-ms:60000}") +
+     @Transactional: query toàn hệ thống findByRemindAtLessThanEqualAnd
+     ReminderSentFalseAndCompletedFalse(now) → mỗi task: tạo notification REMINDER
+     + gửi email (async) + set reminder_sent=true (try/catch từng task để 1 lỗi
+     không vỡ batch). dueText format theo timezone user (fallback UTC).
+   - (Ở M4 scheduler đổi sang PUBLISH event Kafka thay vì gọi trực tiếp.)
+
+3) THÔNG BÁO (notification) — module entity/repo/dto/mapper/service/controller
+   - GET /v1/notifications (newest first, ?unread=true), GET .../unread-count,
+     PATCH .../{id}/read, PATCH .../read-all (JPQL @Modifying), DELETE .../{id}.
+   - NotificationService.create(...) dùng bởi scheduler (không cần SecurityContext).
+
+4) EMAIL — EmailService.sendTaskReminder (@Async) + template
+   templates/email/task-reminder.html (style teal, hiển thị tên task + hạn).
+   Subject "Nhắc việc: {title} - Task Manager".
+
+--------------------------------------------------------------------------------
+E. FRONTEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+- kanban.model: thêm RecurrenceFreq + field lặp vào Task/Create/Update; interface
+  AppNotification.
+- notification.service: signals notifications/unreadCount; list/refreshCount/
+  markRead/markAllRead/delete (cập nhật signal lạc quan).
+- Topbar (main-layout): chuông có badge số chưa đọc (đỏ), dropdown danh sách (item
+  chưa đọc tô teal, thời gian tương đối, click → markRead + điều hướng /board, nút
+  "Đánh dấu tất cả đã đọc", nút xoá ×). POLL unread-count mỗi 60s qua rxjs interval.
+- Modal task: ô ⏰ Nhắc nhở (datetime-local) + mục 🔁 Lặp lại (select freq + input
+  "mỗi N" + "đến ngày" tuỳ chọn). Thẻ Kanban: chip ⏰ (xanh) khi có remindAt và
+  🔁 {freq} (tím) khi có recurrence.
+- LƯU Ý budget: angular.json nâng anyComponentStyle lên warn 10kB/error 16kB.
+
+--------------------------------------------------------------------------------
+F. ENDPOINT (prefix /api/v1)
+--------------------------------------------------------------------------------
+Notification: GET /notifications (?unread=true) ; GET /notifications/unread-count ;
+              PATCH /notifications/{id}/read ; PATCH /notifications/read-all ;
+              DELETE /notifications/{id}
+(Recurrence/Reminder không có endpoint riêng — gắn vào tasks + scheduler.)
+
+--------------------------------------------------------------------------------
+G. KẾT QUẢ KIỂM THỬ (end-to-end)
+--------------------------------------------------------------------------------
+- Reminder: tạo task remindAt quá khứ → scheduler tạo notification (unread-count=1,
+  message "Hạn: …"), reminder_sent=true; phút sau không nhắc lại. Email: chạy BE
+  trỏ Mailpit (MAIL_HOST=localhost MAIL_PORT=1025 MAIL_SMTP_AUTH=false) → Mailpit
+  nhận đúng subject.
+- Recurrence: complete task DAILY → sinh instance mới due/remind +1 ngày,
+  recurrence_freq giữ nguyên, reminder_sent=false, completed=false.
+  recurrence_until quá khứ → KHÔNG sinh thêm.
+- Notification API: mark read (2→1), read-all (→0), ownership user khác 404,
+  delete own 204, no-auth 401.
+
+--------------------------------------------------------------------------------
+H. LƯU Ý
+--------------------------------------------------------------------------------
+- Dev profile trỏ Gmail SMTP; nếu không có App Password sẽ log "Authentication
+  failed" — logic notification VẪN chạy (email chỉ là phụ).
+- Để test email thật vào Mailpit: chạy BE với MAIL_HOST=localhost MAIL_PORT=1025
+  MAIL_SMTP_AUTH=false.
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

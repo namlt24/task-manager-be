@@ -1,0 +1,80 @@
+================================================================================
+ MỞ RỘNG M2 — MỜI THÀNH VIÊN QUA EMAIL + ACCEPT TOKEN
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU M2
+--------------------------------------------------------------------------------
+Cho OWNER/MANAGER mời người khác vào workspace bằng EMAIL + TOKEN chấp nhận
+(nền cho cộng tác nhiều người, dùng ở M3 giao việc).
+
+--------------------------------------------------------------------------------
+B. MÔ HÌNH DỮ LIỆU & MIGRATION (V12__workspace_invitations.sql)
+--------------------------------------------------------------------------------
+- workspace_invitations(id, workspace_id FK→workspaces cascade, email,
+  role MANAGER/MEMBER, token UNIQUE, status PENDING/ACCEPTED/REVOKED,
+  invited_by FK→users SET NULL, expires_at, audit) + index ws + index LOWER(email).
+
+--------------------------------------------------------------------------------
+C. BACKEND — module workspace (mở rộng)
+--------------------------------------------------------------------------------
+- Entity WorkspaceInvitation + enum InvitationStatus; WorkspaceInvitationRepository
+  (findByToken, findByWorkspaceIdAndEmailIgnoreCaseAndStatus, findByIdAndWorkspaceId,
+  findByWorkspaceIdAndStatusOrderByIdDesc).
+- InvitationService:
+  * invite(wsId,req): requireManagerOf; CHẶN role OWNER → 400; đã là member → 409;
+    REUSE invitation PENDING cùng email = resend, sinh token mới UUID + TTL 7 NGÀY;
+    gửi email.
+  * listPending ; revoke (set REVOKED).
+  * preview(token): read-only, KHÔNG throw — trả valid/reason/alreadyMember; kiểm
+    tra email người đăng nhập khớp lời mời.
+  * accept(token): validate status/expiry + EMAIL KHỚP → tạo WorkspaceMember role
+    theo invitation, set ACCEPTED, trả WorkspaceDto.
+- Endpoints: GET/POST /v1/workspaces/{id}/invitations (MANAGER),
+  DELETE .../invitations/{invId} (MANAGER); token-based
+  GET /v1/invitations/{token} (preview), POST /v1/invitations/accept (cần đăng
+  nhập). Hai endpoint token KHÔNG cần X-Workspace-Id.
+- EmailService.sendWorkspaceInvitation (@Async) + template
+  email/workspace-invitation.html (nút "Chấp nhận lời mời" →
+  {frontendUrl}/invite/accept?token=...). AppProperties.frontendUrl
+  (app.frontend-url, env FRONTEND_URL, mặc định http://localhost:4200).
+
+--------------------------------------------------------------------------------
+D. FRONTEND
+--------------------------------------------------------------------------------
+- workspace.model: thêm Invitation, InvitationPreview. workspace.service:
+  invitations/invite/revokeInvitation/previewInvitation/acceptInvitation (accept
+  cập nhật signal + setCurrent workspace mới).
+- returnUrl: authGuard truyền ?returnUrl= khi chưa đăng nhập; login/register điều
+  hướng về returnUrl sau khi auth (link đăng ký/đăng nhập forward query bằng
+  queryParamsHandling="merge") → LINK MỜI TRONG EMAIL SỐNG SÓT qua đăng nhập/đăng ký.
+- Trang /workspace (chỉ MANAGER/OWNER): panel Mời thành viên (email + vai trò) +
+  danh sách lời mời đang chờ (thu hồi ×). Trang mới /invite/accept (full-screen,
+  authGuard): đọc token → preview → "Chấp nhận & tham gia" (hoặc hiển thị lý do
+  không hợp lệ / đã là thành viên) → accept rồi window.location.href='/board'.
+
+--------------------------------------------------------------------------------
+E. KẾT QUẢ KIỂM THỬ (18 ca, curl + node + Mailpit + psql)
+--------------------------------------------------------------------------------
+- invite role OWNER→400; invite MEMBER→201; outsider invite→403; list pending;
+  email vào Mailpit (subject UTF-8 'Lời mời tham gia workspace "Team M2"');
+  preview B valid=true / C valid=false (email mismatch); C accept→403;
+  B accept→200 (member, role MEMBER); B /workspaces thấy Team M2; members liệt kê
+  OWNER+MEMBER; pending rỗng sau accept; re-accept→400; re-invite member→409;
+  RESEND reuse (cùng id, đổi role); revoke→204 + pending rỗng;
+  EXPIRED (set expires_at quá khứ) preview "đã hết hạn"/accept→400; token lạ→"không
+  tồn tại"; accept no-auth→401. FE build xanh.
+
+--------------------------------------------------------------------------------
+F. LƯU Ý
+--------------------------------------------------------------------------------
+- Chạy backend trỏ Mailpit để test email: MAIL_HOST=localhost MAIL_PORT=1025
+  MAIL_SMTP_AUTH=false.
+- Accept YÊU CẦU đăng nhập đúng email được mời (chống chia sẻ link); người được
+  mời chưa có tài khoản thì đăng ký bằng email đó rồi accept (returnUrl giữ link).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

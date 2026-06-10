@@ -1,0 +1,73 @@
+================================================================================
+ MỞ RỘNG M3 — GIAO VIỆC (ASSIGNEE) + "VIỆC CỦA TÔI"
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU M3
+--------------------------------------------------------------------------------
+MANAGER/OWNER giao task cho thành viên; mỗi người xem việc được giao cho mình.
+Nền cho M4 (Kafka thông báo cho ASSIGNEE).
+
+--------------------------------------------------------------------------------
+B. MÔ HÌNH DỮ LIỆU & MIGRATION (V13__task_assignee.sql)
+--------------------------------------------------------------------------------
+- ALTER tasks thêm assignee_id BIGINT REFERENCES users(id) ON DELETE SET NULL
+  (null=chưa giao; user_id vẫn là người tạo) + index. Task entity thêm assigneeId.
+
+--------------------------------------------------------------------------------
+C. BACKEND — module task (mở rộng)
+--------------------------------------------------------------------------------
+- TaskDto thêm assigneeId (MapStruct auto-map); FE TỰ RESOLVE tên/avatar từ danh
+  sách thành viên (tránh N+1, không cần join user ở BE). CreateTaskRequest thêm
+  assigneeId; AssignTaskRequest(assigneeId) (null=gỡ giao).
+- WorkspaceAccess.isMember(wsId,userId) (validate người được giao thuộc workspace).
+- TaskService:
+  * assign(id, req): requireManager() (MANAGER/OWNER) → load task trong workspace
+    → nếu assigneeId != null thì phải là member (else 400) → set + save.
+  * create: resolveAssigneeOnCreate — MEMBER chỉ được TỰ GÁN MÌNH; gán người khác
+    cần MANAGER (else 403); assignee phải là member (else 400).
+  * search(...) thêm tham số assigneeId; spawnNextOccurrence carry-over assignee.
+- TaskController: PATCH /v1/tasks/{id}/assign (body {assigneeId});
+  GET /v1/tasks/search?assignee=me (hoặc assignee={userId}) — controller resolve
+  "me" → SecurityUtils.getCurrentUserId(). ASSIGNMENT chỉ qua endpoint assign +
+  lúc create; PUT /tasks/{id} (update) KHÔNG đụng assignee (tránh MEMBER reassign).
+
+--------------------------------------------------------------------------------
+D. FRONTEND
+--------------------------------------------------------------------------------
+- kanban.model: Task + CreateTaskRequest thêm assigneeId. task.service:
+  assign(id, assigneeId) (PATCH), search({assignee}).
+- Board (board.component): nạp members của workspace hiện tại (cho picker +
+  resolve tên). Modal task: mục 👤 Người thực hiện — MANAGER/OWNER thấy <select>
+  thành viên (đổi → gọi assign ngay, cập nhật chip tại chỗ); MEMBER chỉ xem
+  (read-only avatar+tên). Thẻ Kanban: AVATAR TRÒN góc phải (chữ cái đầu, tooltip
+  "Giao cho: …").
+- Trang /my-tasks "Việc của tôi" (menu sidebar sau Kanban): search({assignee:'me'}),
+  nhóm Đang làm / Đã hoàn thành, mỗi dòng có checkbox tick xong (gửi full
+  UpdateTaskRequest từ Task), chip nhãn, hạn (đỏ nếu quá hạn), nút "Mở bảng Kanban".
+
+--------------------------------------------------------------------------------
+E. ENDPOINT (prefix /api/v1)
+--------------------------------------------------------------------------------
+PATCH /tasks/{id}/assign  (body {assigneeId}; null = gỡ giao; cần MANAGER/OWNER)
+GET   /tasks/search?assignee=me   (hoặc assignee={userId})
+
+--------------------------------------------------------------------------------
+F. KẾT QUẢ KIỂM THỬ (8 ca, curl)
+--------------------------------------------------------------------------------
+- PM giao task cho B→200 (assigneeId=B); B search?assignee=me→thấy task;
+  PM assignee=me→[]; MEMBER B giao cho người khác→403; PM giao cho người ngoài
+  workspace→400; MEMBER tạo task gán người khác→403; MEMBER tạo task tự gán mình
+  →201; PM gỡ giao (null)→200 (assigneeId=null). FE build xanh.
+
+--------------------------------------------------------------------------------
+G. LƯU Ý
+--------------------------------------------------------------------------------
+- Endpoint assign là PATCH (curl phải -X PATCH; -d mặc định POST → 500 "method
+  not supported").
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

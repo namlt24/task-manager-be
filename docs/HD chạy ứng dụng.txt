@@ -1,0 +1,34 @@
+📋 Các câu lệnh để tự chạy lại từ đầu
+1. Bật Docker Desktop (máy này không tự chạy) — đợi ~1-2 phút tới khi sẵn sàng:
+
+
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+2. Hạ tầng (Postgres + Redis + Mailpit):
+
+
+cd d:\task-manager
+docker compose up -d postgres redis mailpit
+3. Adminer (công cụ DB qua web, tùy chọn):
+
+
+docker start tm-adminer
+# (nếu chưa có lần nào:)
+# docker run -d --name tm-adminer --network task-manager_default -p 8090:8080 adminer:latest
+4. Backend (Spring Boot, profile dev, kèm App Password để gửi mail thật):
+
+
+cd d:\task-manager\backend
+$env:MAIL_PASSWORD = "<GMAIL_APP_PASSWORD_16_KY_TU>"   # KHÔNG commit mật khẩu thật
+mvn spring-boot:run "-Dspring-boot.run.profiles=dev"
+5. Frontend (Angular dev server) — mở terminal khác:
+
+
+cd d:\task-manager\frontend
+npm start
+🛑 Lệnh dừng (khi cần)
+
+# Dừng backend/frontend: Ctrl+C trong terminal tương ứng
+# Dừng hạ tầng Docker:
+cd d:\task-manager
+docker compose stop
+docker stop tm-adminer

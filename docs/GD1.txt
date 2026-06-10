@@ -1,0 +1,358 @@
+==========================================================================
+  TASK MANAGER - TỔNG HỢP GIAI ĐOẠN 1: AUTH & USER
+  Ngày hoàn thành: 2026-06-06
+  Trạng thái: DONE - đã verify end-to-end (thật, qua Docker + curl)
+==========================================================================
+
+--------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 1
+--------------------------------------------------------------------------
+Xây dựng nền tảng xác thực & người dùng cho ứng dụng task manager cá nhân
+đa người dùng:
+  - Đăng ký / Đăng nhập / Đăng xuất
+  - JWT access token + refresh token (có rotation)
+  - Phân quyền RBAC (ROLE_USER / ROLE_ADMIN)
+  - Quản lý hồ sơ cá nhân (xem/sửa/đổi mật khẩu)
+  - Giao diện Angular: login, register, layout, dashboard + bảo vệ route
+
+--------------------------------------------------------------------------
+B. CÔNG NGHỆ SỬ DỤNG
+--------------------------------------------------------------------------
+Backend : Java 17, Spring Boot 3.4.1, Maven 3.9
+DB      : PostgreSQL 16 + Flyway (migration)
+Token   : Redis 7 (lưu & xoay refresh token)
+Security: Spring Security stateless + JWT (jjwt 0.12), BCrypt, RBAC
+Mapping : MapStruct 1.6
+API docs: springdoc-openapi (Swagger UI)
+Frontend: Angular 18 (standalone components + signals), RxJS, SCSS
+Hạ tầng : Docker Compose (postgres, redis, mailpit)
+
+Lưu ý: Kế hoạch draft ghi Java 21/Angular 19 nhưng đã hạ xuống 17/18 cho
+khớp toolchain máy. Bucket4j (rate-limit) tạm gỡ, để lại Giai đoạn 7.
+
+==========================================================================
+C. BACKEND - ĐÃ LÀM
+==========================================================================
+
+1) ENTITY & DATABASE
+   - User  : id, email (unique), password_hash (BCrypt), full_name,
+             avatar_url, timezone, enabled, roles (N-N), created/updated_at
+   - Role  : id, name (enum RoleName: ROLE_USER, ROLE_ADMIN)
+   - Bảng nối user_roles
+   - Migration Flyway: V1__init_auth.sql
+       + tạo bảng roles, users, user_roles
+       + index lower(email)
+       + seed sẵn 2 role: ROLE_USER, ROLE_ADMIN
+   - Base class Auditable (created_at / updated_at tự động qua JPA Auditing)
+
+2) SECURITY / JWT
+   - SecurityConfig: stateless, CORS, CSRF off;
+       permitAll: /v1/auth/**, swagger, actuator/health
+       còn lại: yêu cầu đăng nhập
+   - JwtService:
+       + access token (mặc định 15 phút) chứa userId, email, roles
+       + refresh token (mặc định 7 ngày) chứa jti (UUID) duy nhất
+   - JwtAuthenticationFilter: đọc Bearer token -> set SecurityContext
+   - CustomUserDetailsService + AppUserDetails (adapter UserDetails)
+   - RestAuthenticationEntryPoint: trả 401 dạng ProblemDetail
+   - SecurityUtils.getCurrentUserId(): lấy user đang đăng nhập
+   - RefreshTokenStore (Redis, key "refresh:{userId}"):
+       whitelist + ROTATION (mỗi lần refresh sinh token mới, token cũ vô hiệu)
+       logout -> xóa key (revoke)
+
+3) CÁC API ENDPOINT (prefix /api/v1)
+   POST /auth/register        -> 201 + tokens (gán ROLE_USER)
+   POST /auth/login           -> 200 + tokens
+   POST /auth/refresh         -> 200 (xoay token; token cũ bị vô hiệu)
+   POST /auth/logout          -> 204 (revoke refresh token)
+   GET  /users/me             -> 200 hồ sơ user hiện tại
+   PUT  /users/me             -> cập nhật fullName / timezone / avatarUrl
+   PUT  /users/me/password    -> đổi mật khẩu (kiểm tra mật khẩu cũ)
+
+4) XỬ LÝ LỖI CHUẨN
+   - GlobalExceptionHandler (@RestControllerAdvice) trả RFC 7807 ProblemDetail
+   - Exception riêng: ResourceNotFoundException, BadRequestException,
+     ConflictException
+   - Bean Validation (@Valid) trên các DTO request
+
+==========================================================================
+D. FRONTEND - ĐÃ LÀM (Angular 18)
+==========================================================================
+
+1) CORE
+   - models/user.model.ts: User, AuthResponse, LoginRequest, RegisterRequest
+   - services/auth.service.ts:
+       + signals: currentUser, isAuthenticated
+       + login / register / refresh / logout / loadCurrentUser
+   - services/token-storage.service.ts: lưu access/refresh vào localStorage
+   - interceptors/auth.interceptor.ts:
+       + gắn header Authorization: Bearer
+       + bắt lỗi 401 -> tự gọi refresh (chống loop, gom request đồng thời)
+       + refresh fail -> xóa token, chuyển về /login
+   - guards/auth.guard.ts:
+       + authGuard  : chặn route cần đăng nhập
+       + guestGuard : chặn vào login/register khi đã đăng nhập
+
+2) GIAO DIỆN
+   - features/auth/login    : form đăng nhập (reactive form + validation)
+   - features/auth/register : form đăng ký
+   - layout/main-layout     : sidebar + topbar + nút đăng xuất
+   - features/dashboard     : trang tổng quan (thẻ thống kê placeholder)
+
+3) CẤU HÌNH
+   - app.routes.ts: route lazy-load + guard
+   - app.config.ts: provideHttpClient(withInterceptors([authInterceptor]))
+   - environment.ts / environment.production.ts (apiUrl)
+
+==========================================================================
+E. HẠ TẦNG & DEVOPS
+==========================================================================
+   - docker-compose.yml: postgres, redis, mailpit, backend, frontend
+   - Dockerfile backend (multi-stage maven -> JRE alpine)
+   - Dockerfile frontend (node build -> nginx) + nginx.conf proxy /api
+   - .env.example, README.md
+   - Profiles: dev (local), prod (env vars)
+
+==========================================================================
+F. VẤN ĐỀ KỸ THUẬT ĐÃ PHÁT HIỆN & SỬA
+==========================================================================
+   BUG: JWT sinh trong cùng 1 giây có chuỗi GIỐNG HỆT nhau (do iat/exp
+        chính xác tới giây) -> rotation KHÔNG vô hiệu hóa được token cũ.
+   FIX: Thêm claim jti (UUID ngẫu nhiên) vào refresh token -> mỗi token
+        là duy nhất, rotation hoạt động đúng.
+   KẾT QUẢ: token cũ sau rotation -> 401, token mới -> 200 (đã verify).
+
+==========================================================================
+G. KẾT QUẢ KIỂM THỬ END-TO-END (curl thật)
+==========================================================================
+   register                         -> 201
+   register trùng email             -> 409
+   login                            -> 200
+   login sai mật khẩu               -> 401
+   /users/me có token               -> 200
+   /users/me không token            -> 401
+   refresh (đúng thứ tự)            -> 200 (cấp token mới)
+   reuse refresh token cũ sau xoay  -> 401
+   => TẤT CẢ ĐẠT.
+
+==========================================================================
+H. CÁCH CHẠY
+==========================================================================
+   # Docker Desktop phải đang chạy (máy này không tự start)
+   docker compose up -d postgres redis mailpit
+   cd backend  && mvn spring-boot:run -Dspring-boot.run.profiles=dev
+   cd frontend && npm start
+
+   Frontend   : http://localhost:4200
+   Backend API: http://localhost:8080/api
+   Swagger    : http://localhost:8080/api/swagger-ui/index.html
+   Mailpit    : http://localhost:8025
+
+   Tài khoản mẫu: demo@example.com / Password123
+
+==========================================================================
+I. BƯỚC TIẾP THEO
+==========================================================================
+   Giai đoạn 2 - Category/Label & Board/Task (Kanban core + drag&drop)
+==========================================================================
+
+
+==========================================================================
+J. VAI TRÒ TỪNG THÀNH PHẦN (DÙNG ĐỂ LÀM GÌ)
+==========================================================================
+
+--- BACKEND ---------------------------------------------------------------
+
+1) TaskManagerApplication.java
+   Điểm khởi động Spring Boot. Bật @EnableJpaAuditing (tự điền created/updated_at),
+   @EnableScheduling, @EnableAsync (chuẩn bị cho nhắc nhở/email ở GĐ sau).
+
+2) common/entity/Auditable.java
+   Lớp cha (@MappedSuperclass) cho mọi entity. Tự động ghi thời điểm tạo/sửa
+   nhờ AuditingEntityListener. => Không phải lặp code timestamp ở từng entity.
+
+3) common/exception/*
+   - ResourceNotFoundException / BadRequestException / ConflictException:
+     các lỗi nghiệp vụ có ý nghĩa rõ ràng (404 / 400 / 409).
+   - GlobalExceptionHandler: bắt mọi exception, chuyển thành JSON chuẩn
+     RFC 7807 (ProblemDetail) -> client luôn nhận lỗi cùng định dạng.
+
+4) config/AppProperties.java
+   Gom cấu hình tùy biến từ application.yml (app.jwt.*, app.cors.*, app.mail.*,
+   app.storage.*) thành object Java có kiểu. => Đọc config an toàn, gợi ý IDE.
+
+5) config/SecurityConfig.java
+   "Bộ não" bảo mật:
+   - Tắt CSRF, bật CORS, đặt session = STATELESS (không lưu session, chỉ JWT).
+   - Khai báo route công khai (/v1/auth/**, swagger) vs route cần đăng nhập.
+   - Cắm JwtAuthenticationFilter vào chuỗi lọc.
+   - Bean PasswordEncoder (BCrypt) và AuthenticationManager.
+
+6) config/OpenApiConfig.java
+   Cấu hình Swagger UI + khai báo scheme bearer JWT để bấm "Authorize" test API.
+
+7) security/JwtService.java
+   Sinh & đọc JWT:
+   - generateAccessToken: token ngắn hạn (15') mang userId + email + roles.
+   - generateRefreshToken: token dài hạn (7 ngày) mang jti (UUID) duy nhất.
+   - parse / extractUserId / isAccessToken / isRefreshToken: kiểm tra & bóc claim.
+
+8) security/JwtAuthenticationFilter.java
+   Chạy MỖI request: đọc header "Authorization: Bearer ...", nếu là access token
+   hợp lệ -> nạp user -> đặt vào SecurityContext (đánh dấu "đã đăng nhập").
+
+9) security/CustomUserDetailsService.java + AppUserDetails.java
+   Cầu nối giữa User (DB) và Spring Security. UserDetailsService nạp user theo
+   email/id; AppUserDetails bọc User để Spring đọc password & quyền (authorities).
+
+10) security/RestAuthenticationEntryPoint.java
+    Khi request chưa đăng nhập vào route bảo vệ -> trả 401 dạng ProblemDetail
+    (thay vì trang lỗi HTML mặc định).
+
+11) security/SecurityUtils.java
+    Tiện ích lấy nhanh user đang đăng nhập (getCurrentUserId) từ SecurityContext.
+
+12) auth/service/RefreshTokenStore.java
+    Lưu refresh token "đang hợp lệ" của mỗi user trong Redis (key refresh:{userId}).
+    - store: ghi đè token mới (chính là cơ chế ROTATION).
+    - isValid: token client gửi lên có khớp token đang lưu không.
+    - revoke: xóa key khi logout.
+
+13) auth/service/AuthService.java
+    Logic nghiệp vụ xác thực: register (băm mật khẩu, gán ROLE_USER), login
+    (xác thực qua AuthenticationManager), refresh (kiểm tra + xoay token),
+    logout (revoke). Mọi trường hợp đều phát hành cặp token mới qua issueTokens().
+
+14) auth/controller/AuthController.java
+    Khai báo các URL /v1/auth/* và chuyển tiếp xuống AuthService.
+
+15) auth/dto/* (RegisterRequest, LoginRequest, RefreshRequest, AuthResponse)
+    Cấu trúc dữ liệu vào/ra của API auth, kèm validation (@Email, @Size...).
+
+16) user/entity/{User, Role, RoleName}
+    Mô hình dữ liệu người dùng & vai trò.
+
+17) user/repository/{UserRepository, RoleRepository}
+    Truy vấn DB (findByEmail, existsByEmail, findByName...) qua Spring Data JPA.
+
+18) user/service/UserService.java
+    Nghiệp vụ hồ sơ: lấy hồ sơ, cập nhật thông tin, đổi mật khẩu (kiểm tra
+    mật khẩu cũ trước khi đổi).
+
+19) user/mapper/UserMapper.java (MapStruct)
+    Chuyển User (entity) -> UserDto (dữ liệu trả ra), gồm map roles -> List<String>.
+    => Không lộ password_hash ra ngoài.
+
+20) user/controller/UserController.java
+    URL /v1/users/me (GET/PUT) và /v1/users/me/password (PUT).
+
+21) resources/application*.yml + db/migration/V1__init_auth.sql
+    Cấu hình theo profile (dev/prod) và script tạo bảng + seed role.
+
+--- FRONTEND --------------------------------------------------------------
+
+1) core/models/user.model.ts
+   Định nghĩa kiểu dữ liệu (User, AuthResponse, Login/RegisterRequest) khớp API.
+
+2) core/services/token-storage.service.ts
+   Đọc/ghi/xóa access & refresh token trong localStorage. => Nơi DUY NHẤT chạm token.
+
+3) core/services/auth.service.ts
+   Trung tâm xác thực phía FE:
+   - Gọi API login/register/refresh/logout, lưu token, cập nhật signal currentUser.
+   - isAuthenticated / currentUser: cho component & guard biết trạng thái đăng nhập.
+
+4) core/interceptors/auth.interceptor.ts
+   Tự động (không phải gọi tay ở mỗi request):
+   - Gắn "Authorization: Bearer <access>" vào mọi request (trừ login/register/refresh).
+   - Nếu nhận 401 -> tự gọi refresh, lấy token mới rồi PHÁT LẠI request gốc.
+   - Gom nhiều request 401 cùng lúc để chỉ refresh 1 lần (tránh loop/đua).
+   - Refresh thất bại -> xóa token, đưa về /login.
+
+5) core/guards/auth.guard.ts
+   - authGuard: chỉ cho vào route nội bộ khi đã có phiên (token).
+   - guestGuard: đã đăng nhập thì không cho vào lại login/register.
+
+6) features/auth/login + register
+   Form (reactive) nhập liệu, validation, gọi AuthService, hiện lỗi, điều hướng
+   tới /dashboard khi thành công.
+
+7) layout/main-layout
+   Khung giao diện sau đăng nhập: sidebar điều hướng + topbar (tên user, đăng xuất).
+   Khi vào, nếu chưa có currentUser thì gọi /users/me để nạp.
+
+8) features/dashboard
+   Trang tổng quan (hiện tại là placeholder thẻ số liệu).
+
+9) app.routes.ts / app.config.ts / environment*.ts
+   Khai báo route (lazy + guard); đăng ký HttpClient + interceptor; cấu hình apiUrl.
+
+
+==========================================================================
+K. CÁC LUỒNG CHẠY CHI TIẾT
+==========================================================================
+
+--- LUỒNG 1: ĐĂNG KÝ (REGISTER) ------------------------------------------
+  1. User nhập họ tên/email/mật khẩu ở RegisterComponent, bấm "Đăng ký".
+  2. AuthService.register() POST /api/v1/auth/register.
+     (interceptor KHÔNG gắn token vì đây là endpoint auth)
+  3. AuthController -> AuthService.register():
+       - Kiểm tra email đã tồn tại chưa (nếu có -> ném ConflictException -> 409).
+       - Băm mật khẩu bằng BCrypt, gán ROLE_USER, lưu User vào Postgres.
+       - issueTokens(): JwtService sinh access + refresh; RefreshTokenStore lưu
+         refresh vào Redis.
+       - Trả 201 + AuthResponse (2 token + thông tin user).
+  4. FE: TokenStorageService lưu 2 token; cập nhật signal currentUser;
+     điều hướng tới /dashboard.
+
+--- LUỒNG 2: ĐĂNG NHẬP (LOGIN) -------------------------------------------
+  1. LoginComponent gửi email + mật khẩu.
+  2. AuthService.login() POST /api/v1/auth/login.
+  3. AuthService.login():
+       - AuthenticationManager xác thực qua CustomUserDetailsService + BCrypt.
+       - Sai thông tin -> BadCredentialsException -> 401.
+       - Đúng -> issueTokens() (sinh token mới, GHI ĐÈ refresh token cũ trong
+         Redis = rotation), trả 200 + AuthResponse.
+  4. FE lưu token, set currentUser, vào /dashboard.
+
+--- LUỒNG 3: TRUY CẬP TÀI NGUYÊN CẦN ĐĂNG NHẬP (vd /users/me) -------------
+  1. Component/Service gọi GET /api/v1/users/me.
+  2. auth.interceptor gắn "Authorization: Bearer <access>".
+  3. BE: JwtAuthenticationFilter đọc token -> hợp lệ -> nạp user -> đặt vào
+     SecurityContext.
+  4. SecurityConfig thấy đã xác thực -> cho qua tới UserController.
+  5. UserService lấy user theo SecurityUtils.getCurrentUserId(), UserMapper
+     đổi sang UserDto (ẩn password) -> trả 200.
+  * Nếu KHÔNG có/đã hết hạn token: filter không set context ->
+    RestAuthenticationEntryPoint trả 401 (xem luồng 4).
+
+--- LUỒNG 4: TỰ ĐỘNG LÀM MỚI TOKEN KHI 401 (REFRESH) ---------------------
+  1. Access token hết hạn -> request bất kỳ nhận 401.
+  2. auth.interceptor bắt 401 (không phải endpoint auth, còn refresh token):
+       - Gọi AuthService.refresh() POST /api/v1/auth/refresh với refresh token.
+       - Nhiều request 401 đồng thời -> chỉ 1 lần refresh, số còn lại chờ kết quả.
+  3. BE AuthService.refresh():
+       - Parse refresh token; phải đúng loại "refresh".
+       - RefreshTokenStore.isValid(): token có khớp token đang lưu ở Redis không.
+         (token cũ đã bị xoay -> không khớp -> 401)
+       - Hợp lệ -> issueTokens() (sinh cặp mới + ghi đè Redis), trả 200.
+  4. FE lưu token mới rồi PHÁT LẠI request gốc với access token mới -> thành công.
+  5. Nếu refresh cũng 401 (token bị revoke/hết hạn) -> xóa token, về /login.
+
+--- LUỒNG 5: ĐĂNG XUẤT (LOGOUT) ------------------------------------------
+  1. Bấm "Đăng xuất" ở topbar -> AuthService.logout() POST /api/v1/auth/logout.
+  2. BE: AuthService.logout() -> RefreshTokenStore.revoke() xóa key Redis của user
+     => refresh token không còn dùng được nữa.
+  3. FE: xóa token khỏi localStorage, đặt currentUser = null.
+  4. authGuard chặn các route nội bộ -> tự về /login.
+
+--- LUỒNG 6: BẢO VỆ ROUTE PHÍA FE (GUARD) --------------------------------
+  - Vào "/" hoặc "/dashboard": authGuard kiểm tra có token không.
+      Có -> cho vào; Không -> chuyển hướng /login.
+  - Vào "/login" hoặc "/register" khi đã đăng nhập: guestGuard -> đẩy về /dashboard.
+
+--- TÓM TẮT VÒNG ĐỜI TOKEN ------------------------------------------------
+  access token (15')  : đính kèm mọi request; hết hạn thì dùng refresh để lấy mới.
+  refresh token (7d)  : chỉ dùng ở /auth/refresh; mỗi lần dùng bị XOAY (token cũ
+                        chết); lưu ở Redis để có thể thu hồi (logout).
+==========================================================================

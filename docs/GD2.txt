@@ -1,0 +1,268 @@
+================================================================================
+ GIAI ĐOẠN 2 — CATEGORY/LABEL & BOARD/TASK (KANBAN CORE)
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-06
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 2
+--------------------------------------------------------------------------------
+Dựng phần "lõi" quản lý công việc dạng Kanban cho ứng dụng task manager cá nhân:
+  - Danh mục (Category) & Nhãn (Label): phân loại/gắn thẻ công việc.
+  - Bảng (Board) + Cột trạng thái (Column): mô hình Kanban.
+  - Công việc (Task): CRUD, gắn priority/hạn/danh mục/nhãn, di chuyển giữa cột
+    (kéo-thả) với cập nhật vị trí (position).
+  - Giao diện Kanban kéo-thả + modal chi tiết công việc + quản lý danh mục/nhãn.
+
+Nguyên tắc xuyên suốt:
+  - Mọi dữ liệu CÔ LẬP THEO USER (mỗi entity gắn user_id; truy vấn luôn scope theo
+    người dùng hiện tại lấy từ JWT).
+  - Kiểm tra quyền sở hữu (ownership) trước khi đọc/sửa/xoá.
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ SỬ DỤNG
+--------------------------------------------------------------------------------
+Backend : Java 17, Spring Boot 3.4.1, Spring Data JPA (Hibernate 6.6),
+          PostgreSQL 16, Flyway (migration V2, V3), MapStruct, Lombok,
+          Spring Security (JWT có sẵn từ GĐ1), springdoc-openapi (Swagger).
+Frontend: Angular 18 (standalone + signals/plain props), @angular/cdk 18
+          (drag-drop), RxJS, FormsModule (ngModel), SCSS.
+
+--------------------------------------------------------------------------------
+C. MÔ HÌNH DỮ LIỆU & MIGRATION
+--------------------------------------------------------------------------------
+V2__categories_labels.sql
+  - categories(id, user_id FK→users, name, color, icon, position, created_at,
+    updated_at) — unique (user_id, lower(name)), index user_id.
+  - labels(id, user_id FK→users, name, color, created_at, updated_at)
+    — unique (user_id, lower(name)), index user_id.
+
+V3__boards_tasks.sql
+  - boards(id, user_id FK, name, position, created_at, updated_at).
+  - board_columns(id, board_id FK→boards, user_id FK, name, position, audit).
+  - tasks(id, user_id FK, board_id FK, column_id FK→board_columns,
+    category_id FK→categories [ON DELETE SET NULL], title, description TEXT,
+    priority VARCHAR mặc định 'MEDIUM', due_date, remind_at, position,
+    completed BOOLEAN, audit).
+  - task_labels(task_id FK→tasks, label_id FK→labels, PK kép) — quan hệ N–N.
+
+Quy tắc xoá (FK cascade):
+  - Xoá board  → xoá board_columns → xoá tasks (cascade).
+  - Xoá column → xoá tasks trong cột (cascade).
+  - Xoá category → task.category_id = NULL (SET NULL, không mất task).
+  - Xoá task/label → dòng task_labels tương ứng bị xoá (cascade).
+
+--------------------------------------------------------------------------------
+D. BACKEND ĐÃ LÀM (package-by-feature)
+--------------------------------------------------------------------------------
+Mỗi module: entity / repository / dto / mapper / service / controller.
+
+1) com.taskmanager.category
+   - Category (entity), CategoryRepository (findByUserId..., findByIdAndUserId,
+     existsByUserIdAndNameIgnoreCase, countByUserId).
+   - CategoryDto / CategoryRequest, CategoryMapper (MapStruct).
+   - CategoryService: list/create/update/delete; chống trùng tên (409); position
+     = số danh mục hiện có.
+   - CategoryController: /api/v1/categories.
+
+2) com.taskmanager.label  (tương tự, không có position/icon)
+   - Label, LabelRepository, LabelDto/LabelRequest, LabelMapper, LabelService,
+     LabelController: /api/v1/labels.
+
+3) com.taskmanager.board
+   - Board, BoardColumn (entity); BoardRepository, BoardColumnRepository.
+   - DTO: BoardDto, BoardDetailDto, ColumnDto (kèm tasks), BoardRequest,
+     ColumnRequest, ReorderColumnsRequest.
+   - BoardService:
+       * listBoards(): nếu user CHƯA có board → tự tạo board mặc định
+         "Bảng của tôi" + 3 cột "Cần làm / Đang làm / Hoàn thành".
+       * getDetail(boardId): trả payload Kanban đầy đủ (board → columns đã sắp
+         xếp → tasks trong từng cột đã sắp xếp), gom task theo column_id.
+       * createBoard / updateBoard(rename) / deleteBoard.
+       * addColumn / updateColumn(rename) / deleteColumn / reorderColumns.
+   - BoardController: /api/v1/boards (+ /{id}, /{id}/columns, /{id}/columns/reorder).
+   - ColumnController: /api/v1/columns/{id} (rename/delete).
+
+4) com.taskmanager.task
+   - Priority (enum: LOW, MEDIUM, HIGH, URGENT).
+   - Task (entity): các trường + @ManyToMany Set<Label> qua bảng task_labels.
+   - TaskRepository (findByBoardId..., findByColumnId..., findByIdAndUserId,
+     countByColumnId).
+   - DTO: TaskDto (kèm labels), CreateTaskRequest, UpdateTaskRequest,
+     MoveTaskRequest. TaskMapper (MapStruct, uses=LabelMapper).
+   - TaskService: get/create/update/delete + move.
+       * create: validate board & column thuộc user, column thuộc đúng board;
+         validate category & labels thuộc user; position = số task trong cột.
+       * update: cập nhật trường; categoryId null = bỏ danh mục; labelIds != null
+         = thay toàn bộ nhãn; completed/priority cập nhật nếu gửi.
+       * move: đổi column_id + chèn vào vị trí mới; REINDEX lại position 0..n cho
+         cả cột nguồn lẫn cột đích → vị trí luôn liền mạch.
+   - TaskController: /api/v1/tasks (+ /{id}, /{id}/move).
+
+Bảo mật: tất cả endpoint trên đều yêu cầu JWT (SecurityConfig: chỉ /v1/auth/** &
+swagger là public). Service lấy userId qua SecurityUtils.getCurrentUserId() và chỉ
+thao tác trên dữ liệu của chính user đó.
+
+--------------------------------------------------------------------------------
+E. DANH SÁCH ENDPOINT (prefix /api/v1, đều cần Bearer JWT)
+--------------------------------------------------------------------------------
+Category : GET/POST /categories        ; PUT/DELETE /categories/{id}
+Label    : GET/POST /labels            ; PUT/DELETE /labels/{id}
+Board    : GET /boards                 (list, tự tạo board mặc định lần đầu)
+           POST /boards                (tạo board + 3 cột mặc định)
+           GET /boards/{id}            (chi tiết Kanban: columns + tasks)
+           PUT/DELETE /boards/{id}     (đổi tên / xoá)
+           POST /boards/{id}/columns           (thêm cột)
+           PATCH /boards/{id}/columns/reorder  (đổi thứ tự cột)
+Column   : PUT/DELETE /columns/{id}    (đổi tên / xoá cột)
+Task     : POST /tasks                 (tạo)
+           GET/PUT/DELETE /tasks/{id}  (xem / sửa / xoá)
+           PATCH /tasks/{id}/move      ({columnId, position})
+
+--------------------------------------------------------------------------------
+F. FRONTEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+- Cài @angular/cdk@18 (drag-drop).
+- core/models/kanban.model.ts: Priority, Label, Category, Task, BoardColumn,
+  BoardDetail, BoardSummary, CreateTaskRequest, UpdateTaskRequest.
+- core/services: board.service / task.service / category.service / label.service
+  (gọi REST API, dùng environment.apiUrl + interceptor JWT của GĐ1).
+- features/board/board.component (Kanban):
+  * Tải board mặc định (listBoards → board đầu → getDetail) + categories + labels
+    (forkJoin).
+  * Kéo-thả: DragDropModule + cdkDropListGroup; mỗi cột là 1 cdkDropList,
+    mỗi thẻ là cdkDrag. Khi thả: moveItemInArray / transferArrayItem (cập nhật
+    optimistic) rồi gọi PATCH /tasks/{id}/move với index mới; lỗi → reload().
+  * Thẻ task: vạch màu ưu tiên (LOW xám / MEDIUM xanh / HIGH cam / URGENT đỏ),
+    chip danh mục (chấm màu) + nhãn + hạn (🗓 dd/MM HH:mm); gạch ngang nếu đã xong.
+  * Quick-add task mỗi cột (Enter để thêm).
+  * Cột: thêm cột (toolbar), đổi tên (nhấp đúp), xoá cột (×, có confirm).
+  * Modal chi tiết công việc: sửa tiêu đề/mô tả/ưu tiên/hạn (datetime-local)/
+    danh mục/nhãn (chọn nhiều)/đã hoàn thành; nút Xoá/Huỷ/Lưu.
+  * Modal "Danh mục & Nhãn": liệt kê + thêm (kèm chọn màu) + xoá.
+- Route /board (authGuard) + menu "Kanban" ở sidebar (routerLinkActive).
+- Breadcrumb ở layout động theo route (pageTitle: /dashboard→Tổng quan,
+  /board→Kanban).
+
+--------------------------------------------------------------------------------
+G. VAI TRÒ TỪNG THÀNH PHẦN (DÙNG ĐỂ LÀM GÌ)
+--------------------------------------------------------------------------------
+BACKEND
+- Category/Label entity+repo: lưu & truy vấn danh mục/nhãn theo user.
+- Board/BoardColumn entity: cấu trúc bảng Kanban (board chứa nhiều cột).
+- Task entity: bản ghi công việc; @ManyToMany labels để gắn nhiều nhãn.
+- Priority (enum): mức ưu tiên, lưu dạng chuỗi trong DB.
+- *Repository (findByIdAndUserId, findByUserId...): bảo đảm chỉ lấy dữ liệu của
+  đúng user (cô lập dữ liệu).
+- *Service: chứa nghiệp vụ + kiểm tra ownership + validate quan hệ (column thuộc
+  board, category/label thuộc user) + xử lý position/reindex khi move.
+- *Mapper (MapStruct): chuyển entity → DTO (TaskMapper dùng LabelMapper để map
+  danh sách nhãn).
+- *Controller: khai báo REST endpoint, nhận @Valid request, trả DTO.
+- BoardService.listBoards: "khởi tạo mềm" — tạo board + 3 cột mặc định cho user
+  mới, để FE luôn có bảng để hiển thị.
+
+FRONTEND
+- kanban.model.ts: kiểu dữ liệu dùng chung cho toàn module.
+- board/task/category/label.service: lớp gọi API (tách biệt với component).
+- board.component: toàn bộ UI Kanban (render, kéo-thả, modal, quản lý).
+- DragDropModule (@angular/cdk): cơ chế kéo-thả cột/thẻ.
+- FormsModule (ngModel): binding 2 chiều cho input nhanh & form trong modal.
+- main-layout (pageTitle): breadcrumb phản ánh trang hiện tại.
+
+--------------------------------------------------------------------------------
+H. CÁC LUỒNG CHẠY CHI TIẾT
+--------------------------------------------------------------------------------
+1) MỞ BẢNG KANBAN (/board)
+   FE board.component.ngOnInit → reload():
+     GET /boards (BE tự tạo board mặc định nếu chưa có) → lấy board[0].id
+     → forkJoin(GET /boards/{id}, GET /categories, GET /labels)
+     → render cột + thẻ; nạp danh sách category/label cho modal.
+
+2) THÊM CÔNG VIỆC NHANH
+   Nhập tiêu đề ở ô "+ Thêm công việc" của 1 cột → Enter
+   → POST /tasks {boardId, columnId, title}
+   → BE validate board/column thuộc user, position = cuối cột → trả TaskDto
+   → FE push thẻ vào cuối cột.
+
+3) KÉO-THẢ DI CHUYỂN CÔNG VIỆC
+   Người dùng kéo thẻ sang cột/vị trí khác.
+   FE (cdkDropListDropped): moveItemInArray / transferArrayItem (đổi UI ngay -
+   optimistic) → xác định cột đích + index mới → PATCH /tasks/{id}/move
+   {columnId, position}.
+   BE move(): validate cột đích cùng board & thuộc user → đặt column_id + chèn
+   vào vị trí → REINDEX position 0..n cho cột nguồn & cột đích.
+   Nếu API lỗi → FE gọi reload() để đồng bộ lại từ server.
+
+4) XEM/SỬA CHI TIẾT CÔNG VIỆC
+   Click thẻ → mở modal, đổ dữ liệu vào form (chuyển due_date ISO → datetime-local).
+   Bấm Lưu → PUT /tasks/{id} (title/description/priority/dueDate→ISO/categoryId/
+   labelIds/completed) → BE validate category & labels thuộc user, thay nhãn nếu
+   gửi labelIds → trả TaskDto → FE Object.assign cập nhật thẻ tại chỗ.
+   Bấm Xoá → confirm → DELETE /tasks/{id} → FE bỏ thẻ khỏi cột.
+
+5) QUẢN LÝ CỘT
+   Thêm: nhập tên ở toolbar → POST /boards/{id}/columns → push cột mới (rỗng).
+   Đổi tên: nhấp đúp tiêu đề cột → sửa → PUT /columns/{id}.
+   Xoá: bấm × (confirm) → DELETE /columns/{id} (BE cascade xoá task trong cột).
+   (Đổi thứ tự cột: API PATCH /boards/{id}/columns/reorder đã sẵn sàng ở BE.)
+
+6) QUẢN LÝ DANH MỤC & NHÃN (modal)
+   Thêm danh mục/nhãn (kèm chọn màu) → POST /categories | /labels → thêm vào list.
+   Xoá → DELETE /categories/{id} | /labels/{id} (xoá danh mục → task.category_id
+   thành NULL nhờ FK SET NULL).
+
+--------------------------------------------------------------------------------
+I. KẾT QUẢ KIỂM THỬ (end-to-end, thật)
+--------------------------------------------------------------------------------
+Category/Label (curl + PowerShell + psql):
+  create 201 / trùng tên 409 / blank 400 / update 200 / delete 204 /
+  không tồn tại 404 / không auth 401.
+  Cô lập: user B không thấy & không xoá được category của A (404).
+  UTF-8: tên tiếng Việt lưu DB đúng ("Công việc quan trọng").
+
+Board/Column/Task (curl):
+  - Board mặc định "Bảng của tôi" + 3 cột tự tạo khi gọi GET /boards lần đầu.
+  - Tạo task kèm priority/category/label → TaskDto đúng (kèm labels).
+  - MOVE cross-column: Task A sang cột 2 (giữ category/label); Task B được reindex
+    về position 0 ở cột nguồn → ĐÚNG.
+  - update (title/priority/completed/labels), delete task/column, reorder cột:
+    đúng mã trạng thái (200/204).
+  - Ownership: user B xem board của user A → 404.
+
+Frontend (screenshot Chrome headless + inject token vào localStorage):
+  - Bảng hiển thị 3 cột + thẻ có vạch ưu tiên màu, chip danh mục/nhãn/hạn,
+    badge đếm số task, menu "Kanban" active.
+  - Modal chi tiết hiển thị đầy đủ form (ưu tiên "Cao", danh mục, nhãn được chọn).
+
+--------------------------------------------------------------------------------
+J. CÁCH CHẠY & TỰ TEST NHANH
+--------------------------------------------------------------------------------
+1) Hạ tầng:   docker compose up -d postgres redis mailpit
+2) Backend:   cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=dev
+3) Frontend:  cd frontend && npm start
+4) Đăng nhập http://localhost:4200 → vào menu "Kanban":
+   - Kéo-thả thẻ giữa các cột; thêm task nhanh; mở thẻ để sửa chi tiết.
+   - Nút "Danh mục & Nhãn" để tạo danh mục/nhãn rồi gắn vào task.
+5) API/Swagger: http://localhost:8080/api/swagger-ui/index.html (nhóm Categories,
+   Labels, Boards, Tasks). Nhớ Authorize bằng accessToken.
+
+LƯU Ý MÔI TRƯỜNG:
+  - Gửi dữ liệu tiếng Việt để test bằng curl trong Git-Bash dễ HỎNG UTF-8
+    (lỗi 500 "Invalid UTF-8"); hãy test UTF-8 bằng PowerShell
+    [Text.Encoding]::UTF8.GetBytes(...) hoặc qua giao diện/Swagger.
+
+--------------------------------------------------------------------------------
+K. CÒN LẠI / BƯỚC TIẾP THEO
+--------------------------------------------------------------------------------
+GĐ2 đã xong phần lõi Kanban. Có thể mở rộng sau:
+  - Đổi thứ tự cột bằng kéo-thả trên UI (API reorder đã có).
+  - Lọc/tìm task theo nhãn/độ ưu tiên/danh mục (sẽ làm sâu hơn ở GĐ3).
+  - Nhiều board + chuyển board trên UI.
+
+Giai đoạn 3 (kế tiếp): Subtask/Checklist, đính kèm tệp, ghi chú (markdown),
+tìm kiếm nâng cao (JPA Specification).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

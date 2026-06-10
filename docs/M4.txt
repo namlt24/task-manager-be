@@ -1,0 +1,85 @@
+================================================================================
+ MỞ RỘNG M4 — KAFKA + OUTBOX PATTERN + THÔNG BÁO BẤT ĐỒNG BỘ
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU M4
+--------------------------------------------------------------------------------
+Chuyển thông báo (giao việc / hoàn thành / nhắc hạn) sang BẤT ĐỒNG BỘ QUA KAFKA,
+dùng OUTBOX PATTERN để không mất event kể cả khi Kafka tạm chết. Thông báo gửi cho
+ASSIGNEE/CREATOR (không phải chỉ người tạo như trước).
+
+--------------------------------------------------------------------------------
+B. HẠ TẦNG
+--------------------------------------------------------------------------------
+- docker-compose.yml: thêm service kafka (apache/kafka:3.8.1, KRaft single-node) —
+  2 listener: HOST localhost:9092 (backend chạy trên host khi dev) + INTERNAL
+  kafka:19092 (backend trong compose). Healthcheck qua kafka-broker-api-versions.sh.
+  Backend service thêm env KAFKA_BOOTSTRAP=kafka:19092 + depends_on kafka healthy.
+- pom.xml: thêm spring-kafka. application.yml: spring.kafka (bootstrap
+  ${KAFKA_BOOTSTRAP:localhost:9092}, consumer group, String (de)serializer) +
+  app.messaging.{enabled,topic=task-events,outbox-poll-ms=5000}.
+
+--------------------------------------------------------------------------------
+C. OUTBOX + RELAY — module messaging
+--------------------------------------------------------------------------------
+- V14__outbox_events.sql: outbox_events(id, aggregate_type, aggregate_id, type,
+  payload JSON TEXT, published, created_at, published_at) + index (published, id).
+  Entity OutboxEvent + repo findTop200ByPublishedFalseOrderByIdAsc.
+- EventPublisher.publish(...): ghi 1 row outbox (JSON hoá payload) TRONG CÙNG
+  TRANSACTION nghiệp vụ → atomic.
+- OutboxRelay (@Scheduled 5s, @ConditionalOnProperty app.messaging.enabled): quét
+  chưa publish → gửi Kafka (KafkaTemplate.send(...).get() đồng bộ) → set published
+  + published_at. LỖI GỬI → break, giữ nguyên row, retry tick sau (không mất event).
+  KafkaTopicConfig tạo NewTopic task-events (1 partition).
+- Event records: TaskEventPayload(type,taskId,taskTitle,workspaceId,
+  recipientUserId,[actorId-thêm ở M5],title,message,dueText) + hằng số EventTypes
+  (TASK_ASSIGNED/TASK_COMPLETED/TASK_REMINDER, AGGREGATE_TASK).
+
+--------------------------------------------------------------------------------
+D. CONSUMER + THÔNG BÁO
+--------------------------------------------------------------------------------
+- TaskEventConsumer (@KafkaListener topics=task-events group=tm-notification, gated
+  by messaging.enabled): parse JSON → NotificationService.create(recipientUserId,
+  type, title, message, taskId) + GỬI EMAIL cho assignee (ASSIGNED →
+  EmailService.sendTaskAssigned + template task-assigned.html; REMINDER →
+  sendTaskReminder; COMPLETED → chỉ in-app, không email).
+  NotificationType thêm ASSIGNED, COMPLETED (FE model cũng thêm).
+- PUBLISHERS:
+  * TaskService.assign → TASK_ASSIGNED cho assignee (trừ khi tự gán mình).
+  * TaskService.update khi hoàn thành (false→true) → TASK_COMPLETED cho CREATOR
+    (trừ khi tự hoàn thành).
+  * ReminderScheduler đổi từ gọi trực tiếp → PUBLISH TASK_REMINDER (recipient =
+    assignee ?? creator) trong cùng TX với reminder_sent=true.
+
+--------------------------------------------------------------------------------
+E. TEST
+--------------------------------------------------------------------------------
+- AbstractIntegrationTest set app.messaging.enabled=false +
+  spring.kafka.listener.auto-startup=false → context khởi động không cần broker.
+  mvn verify 4/4 xanh. EventPublisher vẫn chạy (chỉ ghi outbox, không cần Kafka).
+
+--------------------------------------------------------------------------------
+F. KẾT QUẢ KIỂM THỬ E2E (curl + psql + Mailpit + kafka-console-consumer)
+--------------------------------------------------------------------------------
+- PM giao task cho B → outbox 1 row published=f ngay sau assign → sau ~8s relay
+  đẩy → published=t + B nhận notification ASSIGNED (unread-count=1) + email Mailpit
+  "Bạn được giao việc: …" + topic task-events có message JSON.
+- B hoàn thành task (update completed=true) → TASK_COMPLETED published → PM
+  (creator) nhận notification "Việc đã hoàn thành".
+- RELIABILITY (điểm cốt lõi outbox): STOP tm-kafka → assign T2 vẫn 200, outbox
+  published=f (event KHÔNG mất sau 8s) → START tm-kafka → relay tự đẩy → published=t
+  + B nhận đủ 2 ASSIGNED.
+
+--------------------------------------------------------------------------------
+G. LƯU Ý
+--------------------------------------------------------------------------------
+- Dev cần Kafka chạy (docker compose up -d kafka); backend vẫn khởi động được nếu
+  Kafka chưa lên (consumer retry nền, relay giữ outbox).
+- Console-consumer trong Git-Bash phải MSYS_NO_PATHCONV=1 (tránh mangle /opt/kafka).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

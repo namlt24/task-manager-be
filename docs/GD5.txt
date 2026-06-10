@@ -1,0 +1,82 @@
+================================================================================
+ GIAI ĐOẠN 5 — POMODORO / TIME-TRACKING
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 5
+--------------------------------------------------------------------------------
+  - Bấm giờ làm việc (stopwatch) + Pomodoro (đếm ngược tập trung/nghỉ).
+  - Ghi nhận phiên thời gian (time_entries) gắn task, tổng hợp theo task.
+  - Trang Pomodoro riêng + bấm giờ ngay trong modal task.
+  - Bổ sung: gắn Ghi chú vào task ngay trong modal (tái dùng note từ GĐ3).
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ
+--------------------------------------------------------------------------------
+Backend : Spring Data JPA, Flyway (V8), partial index (active session).
+Frontend: Angular 18 signals, SVG (vòng đếm), WebAudio (beep), Notification API,
+          setInterval tick theo startedAt (không trôi).
+
+--------------------------------------------------------------------------------
+C. MÔ HÌNH DỮ LIỆU & MIGRATION (V8__time_entries.sql)
+--------------------------------------------------------------------------------
+- time_entries(id, user_id FK→users CASCADE, task_id FK→tasks CASCADE [NULL],
+  source VARCHAR(12) STOPWATCH/POMODORO, started_at, ended_at [NULL=đang chạy],
+  duration_seconds [NULL khi chạy], note, audit)
+  + index user, task, và PARTIAL INDEX active (user_id) WHERE ended_at IS NULL.
+
+--------------------------------------------------------------------------------
+D. BACKEND ĐÃ LÀM — module timetracking
+--------------------------------------------------------------------------------
+- TimeEntry + enum TimeEntrySource. TimeEntryRepository:
+  findFirstByUserIdAndEndedAtIsNull (phiên đang chạy), list theo user/task/from,
+  sumDurationByTaskId (1 task) + sumDurationByTaskIds (batch, tránh N+1).
+- TimeEntryService.start: validate task ownership; AUTO-ĐÓNG phiên đang chạy (tối
+  đa 1 active/user) rồi tạo phiên mới startedAt=now. stop: set endedAt +
+  durationSeconds = giây giữa start→end. getActive, list, totalSecondsForTask, delete.
+- Endpoints (cần JWT, scope user):
+  POST /v1/time-entries/start (body {taskId?, source?, note?}, mặc định STOPWATCH),
+  PATCH /v1/time-entries/{id}/stop, GET /v1/time-entries/active (204 nếu không có),
+  GET /v1/time-entries (?taskId= hoặc ?from=ISO),
+  GET /v1/time-entries/summary?taskId=, DELETE /v1/time-entries/{id}.
+- TaskDto thêm trackedSeconds; BoardService.getDetail batch-load sumDurationByTaskIds.
+
+--------------------------------------------------------------------------------
+E. FRONTEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+- kanban.model: trackedSeconds vào Task, type TimeEntrySource, interface TimeEntry.
+- time-entry.service: signal active; loadActive (xử lý 204)/start/stop/list/
+  summary/delete. TaskService.search({q?, completed?}) nạp task cho bộ chọn.
+- Trang Pomodoro features/timer (route /timer, menu "Pomodoro"): toggle 🍅 Pomodoro
+  / ⏱️ Bấm giờ, chọn task, cấu hình phút tập trung/nghỉ, vòng đếm SVG (Pomodoro
+  đếm ngược + ring; stopwatch đếm lên), Bắt đầu/Dừng&lưu/Bỏ qua nghỉ. Pomodoro: hết
+  focus → tự stop (ghi WORK) + beep + Notification + chuyển nghỉ (nghỉ chỉ chạy
+  local); hết nghỉ → idle. RESUME phiên đang chạy sau refresh qua loadActive.
+  Panel "Hôm nay": tổng giờ + lịch sử phiên (xoá được).
+- Modal task: mục ⏱ Thời gian đã làm (tổng + ▶ Bắt đầu/⏹ Dừng STOPWATCH gắn task,
+  số chạy live "● đang chạy"); đóng modal chỉ dừng tick local, phiên server vẫn
+  chạy. Thẻ Kanban chip ⏱ {thời gian}.
+- Bổ sung Ghi chú trong modal task: list note của task + thêm nhanh + xoá (tái
+  dùng note.service GĐ3).
+
+--------------------------------------------------------------------------------
+F. KẾT QUẢ KIỂM THỬ (end-to-end)
+--------------------------------------------------------------------------------
+- start (201) → stop (durationSeconds đúng) → active sau stop 204 → summary +
+  TaskDto.trackedSeconds khớp. Auto-stop: start A rồi start B → A bị đóng, chỉ B
+  active. Ownership: B start trên task A → 400; B stop/delete entry A → 404;
+  no-auth 401.
+- Screenshot: trang Pomodoro (dial 25:00, toggle, settings, lịch sử "Hôm nay");
+  modal có ⏱ + chip ⏱ trên thẻ; bấm ▶ → đếm live "7s ● đang chạy".
+
+--------------------------------------------------------------------------------
+G. LƯU Ý
+--------------------------------------------------------------------------------
+- Entry 0 giây: template lịch sử dùng durationSeconds != null (không dùng truthy)
+  để không hiện nhầm "đang chạy".
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

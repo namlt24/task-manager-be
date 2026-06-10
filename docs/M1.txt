@@ -1,0 +1,92 @@
+================================================================================
+ MỞ RỘNG M1 — WORKSPACE & MEMBERSHIP CORE (NỀN TẢNG CỘNG TÁC)
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU M1
+--------------------------------------------------------------------------------
+Chuyển từ "task manager cá nhân" sang "cộng tác nhóm": đổi cô lập dữ liệu từ
+USER → WORKSPACE; vai trò OWNER/MANAGER/MEMBER; mỗi user có workspace "Cá nhân"
+(migrate dữ liệu cũ vào). Nền cho M2 (invite), M3 (giao việc), M4 (Kafka),
+M5 (realtime).
+
+--------------------------------------------------------------------------------
+B. MÔ HÌNH DỮ LIỆU & MIGRATION
+--------------------------------------------------------------------------------
+V10__workspaces.sql
+  - workspaces(id, name, owner_id FK→users, audit).
+  - workspace_members(id, workspace_id FK, user_id FK, role VARCHAR(10)
+    OWNER/MANAGER/MEMBER, audit, UNIQUE(workspace_id,user_id)).
+
+V11__scope_to_workspace.sql
+  - Tạo 1 workspace "Cá nhân"/user + OWNER membership.
+  - Thêm workspace_id (NOT NULL, backfill theo owner_id=user_id) vào:
+    boards / board_columns / categories / labels / notes / tasks.
+  - Đổi unique category/label name từ (user_id,name) → (workspace_id,name).
+  - Backfill verify: 37 ws, 37 owners, 0 task NULL ws.
+
+--------------------------------------------------------------------------------
+C. BACKEND — module workspace
+--------------------------------------------------------------------------------
+- Entities Workspace/WorkspaceMember + enum WorkspaceRole; repos.
+- WorkspaceContext (ThreadLocal) + WorkspaceContextFilter (@Component, đọc header
+  X-Workspace-Id).
+- WorkspaceAccess (bean workspaceAccess):
+  * currentWorkspaceId() (header → fallback workspace cá nhân, VERIFY membership).
+  * requireManager()/requireOwner() (+ biến thể ...Of(id) cho endpoint mang id ở path).
+  * isMember(wsId,userId), roleOf(wsId,userId).
+- WorkspaceService/Controller:
+  GET/POST /v1/workspaces, GET /v1/workspaces/{id}/members,
+  PATCH .../members/{userId}/role (OWNER), DELETE .../members/{userId} (OWNER);
+  provision(userId,name) tạo workspace + OWNER (gọi khi REGISTER).
+- AuthService.register → tạo workspace "Cá nhân" + OWNER.
+- REFACTOR SCOPE TOÀN BỘ (user_id → workspace_id + role): board/category/label/
+  note/task service+repo dùng findByWorkspaceId...; TẠO/SỬA/XOÁ board/cột/danh mục/
+  nhãn cần MANAGER; task CRUD cho mọi member (M1; siết theo assignee ở M3). Child
+  theo task (subtask/attachment) validate taskRepository.findByIdAndWorkspaceId;
+  time-entry vẫn theo user nhưng task phải thuộc workspace; REPORT scope workspace
+  (ReportRepository native đổi user_id→workspace_id). Cache categories/labels đổi
+  key → @workspaceAccess.currentWorkspaceId().
+- Common: ForbiddenException (403) + handler.
+
+--------------------------------------------------------------------------------
+D. FRONTEND
+--------------------------------------------------------------------------------
+- core/models/workspace.model.ts; core/services/workspace.service.ts (signals
+  workspaces/currentId/current/isManager, persist tm_workspace_id localStorage,
+  load/create/setCurrent/members/changeRole/removeMember).
+- core/interceptors/workspace.interceptor.ts: gắn header X-Workspace-Id (đăng ký
+  trong app.config.ts cùng authInterceptor).
+- WORKSPACE SWITCHER đầu sidebar (chọn/đổi + "Tạo workspace"); đổi workspace →
+  window.location.reload() để mọi trang nạp lại đúng workspace. Menu "Thành viên"
+  + trang /workspace (danh sách thành viên + vai trò; OWNER đổi role + xoá).
+
+--------------------------------------------------------------------------------
+E. ENDPOINT (prefix /api/v1)
+--------------------------------------------------------------------------------
+GET/POST /workspaces ; GET /workspaces/{id}/members ;
+PATCH /workspaces/{id}/members/{userId}/role (OWNER) ;
+DELETE /workspaces/{id}/members/{userId} (OWNER).
+(Mọi endpoint nghiệp vụ khác đọc workspace qua header X-Workspace-Id.)
+
+--------------------------------------------------------------------------------
+F. KẾT QUẢ KIỂM THỬ (end-to-end)
+--------------------------------------------------------------------------------
+- Backfill đúng; A login thấy workspace "Cá nhân" (OWNER) + dữ liệu cũ.
+- CÔ LẬP: B dùng X-Workspace-Id của A → 403 (categories/boards); B trong workspace
+  riêng thấy rỗng. A tạo workspace "Dev Team", tạo board (OWNER 201), members liệt
+  kê OWNER, board cô lập; changeRole user lạ → 404.
+- mvn verify 4/4 xanh (GĐ7 IT vẫn pass sau refactor). Screenshot switcher + trang
+  Thành viên.
+
+--------------------------------------------------------------------------------
+G. LƯU Ý / HẠN CHẾ
+--------------------------------------------------------------------------------
+- FE chưa ẩn nút quản trị (+Cột/Danh mục) với MEMBER — backend đã chặn 403; polish sau.
+- Notification vẫn per-user (chuyển sang Kafka ở M4).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

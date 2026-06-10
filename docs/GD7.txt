@@ -1,0 +1,74 @@
+================================================================================
+ GIAI ĐOẠN 7 — HOÀN THIỆN: RATE-LIMIT, CACHE REDIS, HARDENING, TESTCONTAINERS
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 7
+--------------------------------------------------------------------------------
+  - Chống brute-force endpoint auth (rate-limit bằng Redis, KHÔNG Bucket4j).
+  - Cache Redis cho dữ liệu đọc nhiều (categories/labels).
+  - Hardening bảo mật (security headers, ẩn lỗi nội bộ).
+  - Test tích hợp thật bằng Testcontainers (Postgres + Redis) → mvn verify xanh.
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ
+--------------------------------------------------------------------------------
+Backend : Spring Data Redis (INCR/EXPIRE), Spring Cache (RedisCacheManager),
+          Spring Security headers, Testcontainers + maven-failsafe-plugin.
+
+--------------------------------------------------------------------------------
+C. RATE-LIMIT ĐĂNG NHẬP (Redis, KHÔNG Bucket4j)
+--------------------------------------------------------------------------------
+- security/RateLimitFilter (OncePerRequestFilter, thêm trong SecurityConfig qua
+  addFilterBefore): chặn brute-force cho POST /v1/auth/{login,register,
+  forgot-password,reset-password} theo IP (header X-Forwarded-For ưu tiên, fallback
+  remoteAddr) bằng Redis fixed-window (INCR + EXPIRE). Vượt ngưỡng → 429
+  ProblemDetail + header Retry-After. FAIL-OPEN nếu Redis lỗi.
+- Cấu hình AppProperties.RateLimit (app.rate-limit.enabled/auth-requests=10/
+  window-seconds=60).
+- Verify: 10 request đầu qua, từ request 11 → 429 + Retry-After.
+
+--------------------------------------------------------------------------------
+D. CACHE REDIS (categories/labels)
+--------------------------------------------------------------------------------
+- config/CacheConfig (@EnableCaching + RedisCacheManager, TTL 30', JSON value).
+  Dùng ObjectMapper.copy() + default typing EVERYTHING để record DTO round-trip
+  đúng (không thành LinkedHashMap).
+- CategoryService/LabelService: @Cacheable(cacheNames="categories"/"labels",
+  key=userId) trên list(); @CacheEvict trên create/update/delete.
+  (Ở M1 key đổi sang @workspaceAccess.currentWorkspaceId().)
+- Verify: GET tạo key categories::{uid}; create → evict; GET lại repopulate.
+
+--------------------------------------------------------------------------------
+E. HARDENING
+--------------------------------------------------------------------------------
+- SecurityConfig headers: X-Frame-Options: DENY, X-Content-Type-Options: nosniff,
+  Referrer-Policy: same-origin, HSTS (chỉ phát qua HTTPS).
+- application.yml: server.error.include-message/stacktrace/binding-errors: never.
+- ĐỔI PUBLIC_MATCHERS → AntPathRequestMatcher (servlet-path based) thay cho
+  MvcRequestMatcher mặc định — tránh lỗi không match /v1/auth/** trong
+  @SpringBootTest (nguyên nhân test register bị 401).
+
+--------------------------------------------------------------------------------
+F. TEST TESTCONTAINERS
+--------------------------------------------------------------------------------
+- pom.xml: thêm maven-failsafe-plugin (chạy *IT ở phase verify).
+- src/test: AbstractIntegrationTest (Postgres 16 + Redis 7 qua Testcontainers +
+  @DynamicPropertySource, profile test), AuthAndTaskFlowIT (register→login→
+  /users/me, no-token 401, tạo category + trùng 409, rate-limit 429).
+  Dùng ABSOLUTE URL + @LocalServerPort (tránh TestRestTemplate prepend
+  context-path) + X-Forwarded-For khác nhau mỗi test để cô lập rate-limit bucket.
+- KẾT QUẢ: mvn verify → 4/4 xanh.
+
+--------------------------------------------------------------------------------
+G. LƯU Ý
+--------------------------------------------------------------------------------
+- Cần Docker daemon khi chạy mvn verify (Testcontainers).
+- Redis dùng GenericContainer (module testcontainers postgresql/junit-jupiter có
+  sẵn từ GĐ0).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================

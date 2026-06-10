@@ -1,0 +1,87 @@
+================================================================================
+ GIAI ĐOẠN 6 — THỐNG KÊ & DASHBOARD (BIỂU ĐỒ, CALENDAR, EXPORT CSV)
+ Tài liệu tổng hợp những gì đã làm
+ Cập nhật: 2026-06-10
+================================================================================
+
+--------------------------------------------------------------------------------
+A. MỤC TIÊU GIAI ĐOẠN 6
+--------------------------------------------------------------------------------
+  - Dashboard số liệu thật (thay mock): tổng/hoàn thành/đang làm/quá hạn, tỉ lệ
+    hoàn thành, theo ưu tiên, theo danh mục, thời gian tracked, streak năng suất.
+  - Biểu đồ năng suất N ngày (SVG, không thư viện).
+  - Calendar view theo due date.
+  - Xuất CSV.
+
+--------------------------------------------------------------------------------
+B. CÔNG NGHỆ
+--------------------------------------------------------------------------------
+Backend : Native query group-by-day (AT TIME ZONE), Flyway (V9), tính theo
+          timezone của user.
+Frontend: Angular 18, SVG nội tuyến (chart), Blob download (CSV qua HttpClient
+          để interceptor gắn JWT).
+
+--------------------------------------------------------------------------------
+C. MÔ HÌNH DỮ LIỆU & MIGRATION (V9__task_completed_at.sql)
+--------------------------------------------------------------------------------
+- ALTER tasks thêm completed_at TIMESTAMPTZ (backfill = updated_at cho việc đã
+  xong) + partial index. TaskService.update set completed_at=now() khi completed
+  false→true, null khi true→false (mốc cho năng suất/streak; KHÔNG thêm vào TaskDto).
+
+--------------------------------------------------------------------------------
+D. BACKEND ĐÃ LÀM — module report (không bảng mới, chỉ truy vấn tổng hợp)
+--------------------------------------------------------------------------------
+- ReportRepository extends JpaRepository<Task,Long> — NATIVE QUERIES:
+  countTotal/Completed/Overdue (due_date<now() & !completed), countByPriority/
+  Category (group by), trackedSecondsSince (time_entries), per-day created/
+  completed/tracked (date_trunc('day', col AT TIME ZONE :tz) → gom theo ngày địa
+  phương user), completedDaysDesc (distinct ngày có việc xong → tính streak).
+- ReportService (timezone từ users.timezone, fallback UTC):
+  * summary: total/completed/pending/overdue, completionRate, byPriority map,
+    byCategory list, trackedToday/Week, streakDays (chuỗi ngày liên tiếp có việc
+    xong, tính cả tới hôm qua).
+  * productivity(days): chuỗi N ngày, điền 0 cho ngày trống.
+  * calendar(from,to): task có due trong khoảng + màu category.
+  * exportCsv: BOM UTF-8 + header tiếng Việt, escape, kèm danh mục/nhãn/tracked.
+- ReportController /v1/reports: GET /summary, GET /productivity?days=,
+  GET /calendar?from=&to=, GET /export (text/csv, Content-Disposition attachment).
+- TaskRepository thêm findByUserIdAndDueDateBetweenOrderByDueDateAsc +
+  findByUserIdOrderByCreatedAtDesc.
+
+--------------------------------------------------------------------------------
+E. FRONTEND ĐÃ LÀM
+--------------------------------------------------------------------------------
+- report.model + report.service (summary/productivity/calendar/exportCsv blob).
+- Dashboard /dashboard VIẾT LẠI từ mock → thật: 4 thẻ (Tổng/Hoàn thành+%/Đang làm/
+  Quá hạn), vòng tròn completionRate (SVG), thẻ tracked Hôm nay/7 ngày/streak,
+  thanh theo độ ưu tiên, biểu đồ năng suất 14 ngày (2 đường SVG Tạo mới teal/Hoàn
+  thành đỏ + lưới + nhãn ngày), theo danh mục (thanh), nút ⬇ Xuất CSV (tải blob).
+- Trang Lịch /calendar (menu "Lịch"): lưới tháng Thứ-2-đầu-tuần, điều hướng tháng
+  + "Hôm nay", ô hôm nay tô teal, mỗi task hiện ở đúng ngày due (giờ địa phương,
+  viền màu theo category/priority, gạch ngang nếu xong). Tải qua reports/calendar.
+
+--------------------------------------------------------------------------------
+F. ENDPOINT (prefix /api/v1)
+--------------------------------------------------------------------------------
+Report: GET /reports/summary ; GET /reports/productivity?days= ;
+        GET /reports/calendar?from=&to= ; GET /reports/export (CSV)
+
+--------------------------------------------------------------------------------
+G. KẾT QUẢ KIỂM THỬ (end-to-end)
+--------------------------------------------------------------------------------
+- summary (total 6/completed 3/50%/byPriority/byCategory/tracked/streak=1),
+  productivity 7/14 ngày (today created/completed/tracked đúng), calendar trả task
+  theo due, export CSV (Content-Disposition + BOM + header VN + completed_at).
+- Screenshot: dashboard đủ thẻ + ring 50% + biểu đồ 2 đường + ưu tiên + danh mục
+  + nút Xuất CSV; calendar tháng 6 với hôm nay tô teal + thẻ "18:57 Review meeting".
+
+--------------------------------------------------------------------------------
+H. LƯU Ý
+--------------------------------------------------------------------------------
+- PUT /tasks/{id} là FULL-UPDATE (thiếu field nào → ghi null) — sửa task qua API
+  phải gửi đủ field (vd gán categoryId mà quên dueDate sẽ xoá hạn).
+- Menu "Báo cáo" vẫn là placeholder (Dashboard đã là trang report).
+
+================================================================================
+ Nguồn sự thật theo dõi tiến độ: d:\task-manager\CLAUDE.md
+================================================================================
